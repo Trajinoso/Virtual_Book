@@ -104,10 +104,9 @@ def analizar_imagen_con_gemini(imagen_bytes):
 
 def buscar_en_google_books(titulo, autor=""):
     """
-    Realiza la consulta pública a Google Books enviando el parámetro country='ES'
-    para evitar el bloqueo 403 por geolocalización en servidores cloud (Streamlit Cloud).
+    Realiza la búsqueda de metadatos y portadas utilizando Open Library API.
+    Evita los bloqueos de geolocalización (403) de Google Books en servidores Cloud.
     """
-    # 1. Limpiar título y autor
     titulo_clean = re.sub(r'[^\w\s]', ' ', titulo).strip() if titulo else ""
     autor_clean = re.sub(r'[^\w\s]', ' ', autor).strip() if autor and autor != "Desconocido" else ""
     
@@ -121,56 +120,52 @@ def buscar_en_google_books(titulo, autor=""):
             "isbn": "N/A"
         }
 
-    # 2. Construir intentos de búsqueda
+    # Intentos de consulta en Open Library
     consultas = []
     if titulo_clean and autor_clean:
-        consultas.append(f"{titulo_clean} {autor_clean}")
-    if titulo_clean:
-        consultas.append(titulo_clean)
+        consultas.append({"title": titulo_clean, "author": autor_clean})
+    consultas.append({"title": titulo_clean})
 
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    headers = {"User-Agent": "BibliotecaVirtualApp/1.0"}
 
-    # 3. Petición HTTP agregando el parámetro 'country'
-    for query in consultas:
-        params = {
-            "q": query,
-            "maxResults": 1,
-            "printType": "books",
-            "country": "ES"  # <--- ESTO RESUELVE EL ERROR 403 EN SERVIDORES CLOUD
-        }
+    for params in consultas:
+        url = "https://openlibrary.org/search.json"
         try:
-            res = requests.get("https://www.googleapis.com/books/v1/volumes", params=params, headers=headers, timeout=5)
+            res = requests.get(url, params=params, headers=headers, timeout=5)
             if res.status_code == 200:
                 datos = res.json()
-                if "items" in datos and len(datos["items"]) > 0:
-                    info = datos["items"][0]["volumeInfo"]
+                docs = datos.get("docs", [])
+                if docs:
+                    libro = docs[0]
                     
-                    imagenes = info.get("imageLinks", {})
-                    portada_url = imagenes.get("thumbnail") or imagenes.get("smallThumbnail") or ""
-                    if portada_url.startswith("http://"):
-                        portada_url = portada_url.replace("http://", "https://")
+                    # Portada (Open Library Cover API)
+                    cover_i = libro.get("cover_i")
+                    portada_url = f"https://covers.openlibrary.org/b/id/{cover_i}-L.jpg" if cover_i else ""
 
-                    identifiers = info.get("industryIdentifiers", [])
-                    isbn = "N/A"
-                    for item in identifiers:
-                        if item.get("type") in ["ISBN_13", "ISBN_10"]:
-                            isbn = item.get("identifier", "N/A")
-                            break
-                    if isbn == "N/A" and identifiers:
-                        isbn = identifiers[0].get("identifier", "N/A")
+                    # ISBN
+                    isbns = libro.get("isbn", [])
+                    isbn = isbns[0] if isbns else "N/A"
+
+                    # Fecha de publicación
+                    pub_date = str(libro.get("first_publish_year") or "N/A")
+
+                    # Número de páginas (si no está disponible en la lista de docs)
+                    num_paginas = str(libro.get("number_of_pages_median") or "N/A")
+
+                    # Autores
+                    autores_list = libro.get("author_name", [autor if autor else "Desconocido"])
 
                     return {
-                        "titulo": info.get("title", titulo),
-                        "autor": ", ".join(info.get("authors", [autor if autor else "Desconocido"])),
-                        "publicacion": info.get("publishedDate", "N/A"),
-                        "paginas": str(info.get("pageCount", "N/A")),
+                        "titulo": libro.get("title", titulo),
+                        "autor": ", ".join(autores_list[:2]),
+                        "publicacion": pub_date,
+                        "paginas": num_paginas,
                         "portada": portada_url,
                         "isbn": isbn
                     }
         except Exception:
             continue
 
-    # Fallback si no hay coincidencias
     return {
         "titulo": titulo,
         "autor": autor if autor else "Desconocido",
