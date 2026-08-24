@@ -34,10 +34,12 @@ conn = obtener_conexion_db()
 
 def guardar_libro_db(libro):
     cursor = conn.cursor()
-    if libro["isbn"] != "N/A":
+    
+    # Comprobar duplicados por ISBN o combinación Título + Autor
+    if libro["isbn"] != "N/A" and libro["isbn"] != "":
         cursor.execute("SELECT id FROM libros WHERE isbn = ?", (libro["isbn"],))
     else:
-        cursor.execute("SELECT id FROM libros WHERE titulo = ? AND autor = ?", (libro["titulo"], libro["autor"]))
+        cursor.execute("SELECT id FROM libros WHERE LOWER(titulo) = LOWER(?) AND LOWER(autor) = LOWER(?)", (libro["titulo"], libro["autor"]))
         
     if cursor.fetchone() is None:
         cursor.execute("""
@@ -72,7 +74,8 @@ def analizar_imagen_con_gemini(imagen_bytes):
     Analiza esta imagen. Puede contener un solo libro (portada/lomo) o varios libros en una estantería.
     Identifica todos los libros visibles.
     Devuelve ÚNICAMENTE un JSON válido con una lista de objetos con claves "titulo" y "autor".
-    Ejemplo: [{"titulo": "1984", "autor": "George Orwell"}]
+    Si no sabes el autor, pon "Desconocido".
+    Ejemplo: [{"titulo": "La montaña hueca", "autor": "B. Catling"}]
     """
 
     try:
@@ -90,11 +93,14 @@ def analizar_imagen_con_gemini(imagen_bytes):
         return []
 
 def buscar_en_google_books(titulo, autor=""):
-    # Limpiar textos
+    """
+    Realiza una búsqueda inteligente en la API de Google Books.
+    Si falla la búsqueda estricta, reintenta buscando únicamente por el título.
+    """
     titulo_clean = titulo.strip() if titulo else ""
     autor_clean = autor.strip() if autor and autor != "Desconocido" else ""
     
-    # Lista de intentos: 1º Título + Autor, 2º Solo Título
+    # 1. Intentos de búsqueda: Primero Título + Autor, luego solo Título
     consultas = []
     if titulo_clean and autor_clean:
         consultas.append(f"{titulo_clean} {autor_clean}")
@@ -127,21 +133,22 @@ def buscar_en_google_books(titulo, autor=""):
                 if isbn == "N/A" and identifiers:
                     isbn = identifiers[0].get("identifier", "N/A")
 
+                # Devolver los datos obtenidos
                 return {
                     "titulo": info.get("title", titulo),
-                    "autor": ", ".join(info.get("authors", [autor])),
+                    "autor": ", ".join(info.get("authors", [autor if autor else "Desconocido"])),
                     "publicacion": info.get("publishedDate", "N/A"),
                     "paginas": str(info.get("pageCount", "N/A")),
                     "portada": portada_url,
                     "isbn": isbn
                 }
-        except Exception as e:
+        except Exception:
             continue
 
-    # Si tras intentar las consultas no se halla nada en Google Books
+    # Si tras intentar las búsquedas Google Books no devuelve nada, conservar título y autor de Gemini
     return {
         "titulo": titulo,
-        "autor": autor,
+        "autor": autor if autor else "Desconocido",
         "publicacion": "N/A",
         "paginas": "N/A",
         "portada": "",
@@ -161,19 +168,19 @@ if uploaded_file is not None:
         st.image(uploaded_file, caption="Foto subida", use_container_width=True)
     with col2:
         if st.button("🔍 Escanear e Guardar en Biblioteca", type="primary"):
-            with st.spinner("1/2: Analizando imagen con IA..."):
+            with st.spinner("1/2: Analizando imagen con Inteligencia Artificial..."):
                 bytes_data = uploaded_file.getvalue()
                 libros_extraidos = analizar_imagen_con_gemini(bytes_data)
                 
             if libros_extraidos:
                 nuevos_guardados = 0
-                with st.spinner("2/2: Obteniendo datos de Google Books..."):
+                with st.spinner("2/2: Obteniendo portadas y datos desde Google Books..."):
                     for libro_raw in libros_extraidos:
-                        detalles = buscar_en_google_books(libro_raw.get("titulo"), libro_raw.get("autor"))
+                        detalles = buscar_en_google_books(libro_raw.get("titulo", ""), libro_raw.get("autor", ""))
                         if guardar_libro_db(detalles):
                             nuevos_guardados += 1
                             
-                st.toast(f"¡{nuevos_guardados} libro(s) añadido(s)!", icon="🎉")
+                st.toast(f"¡{nuevos_guardados} libro(s) procesado(s) correctamente!", icon="🎉")
                 st.rerun()
 
 st.divider()
@@ -199,3 +206,5 @@ if libros_guardados:
     with st.expander("Ver base de datos en formato tabla"):
         df = pd.DataFrame(libros_guardados)
         st.dataframe(df[["id", "titulo", "autor", "publicacion", "paginas", "isbn"]], use_container_width=True)
+else:
+    st.info("Aún no has escaneado ningún libro. Sube una foto arriba para empezar.")
