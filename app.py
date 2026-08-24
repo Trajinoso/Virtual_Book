@@ -90,31 +90,63 @@ def analizar_imagen_con_gemini(imagen_bytes):
         return []
 
 def buscar_en_google_books(titulo, autor=""):
-    query = f"{titulo} {autor}".strip()
-    url = f"https://www.googleapis.com/books/v1/volumes?q={requests.utils.quote(query)}&maxResults=1"
+    # Limpiar textos
+    titulo_clean = titulo.strip() if titulo else ""
+    autor_clean = autor.strip() if autor and autor != "Desconocido" else ""
     
-    try:
-        res = requests.get(url)
-        datos = res.json()
-        if "items" in datos and len(datos["items"]) > 0:
-            info = datos["items"][0]["volumeInfo"]
-            imagenes = info.get("imageLinks", {})
-            portada_url = imagenes.get("thumbnail") or imagenes.get("smallThumbnail") or ""
-            if portada_url.startswith("http://"):
-                portada_url = portada_url.replace("http://", "https://")
+    # Lista de intentos: 1º Título + Autor, 2º Solo Título
+    consultas = []
+    if titulo_clean and autor_clean:
+        consultas.append(f"{titulo_clean} {autor_clean}")
+    if titulo_clean:
+        consultas.append(titulo_clean)
+
+    headers = {"User-Agent": "Mozilla/5.0"}
+
+    for query in consultas:
+        url = f"https://www.googleapis.com/books/v1/volumes?q={requests.utils.quote(query)}&maxResults=1"
+        try:
+            res = requests.get(url, headers=headers, timeout=5)
+            datos = res.json()
+            
+            if "items" in datos and len(datos["items"]) > 0:
+                info = datos["items"][0]["volumeInfo"]
+                imagenes = info.get("imageLinks", {})
+                portada_url = imagenes.get("thumbnail") or imagenes.get("smallThumbnail") or ""
                 
-            return {
-                "titulo": info.get("title", titulo),
-                "autor": ", ".join(info.get("authors", [autor])),
-                "publicacion": info.get("publishedDate", "N/A"),
-                "paginas": str(info.get("pageCount", "N/A")),
-                "portada": portada_url,
-                "isbn": info.get("industryIdentifiers", [{}])[0].get("identifier", "N/A")
-            }
-    except Exception as e:
-        st.warning(f"No se pudieron obtener los detalles de '{titulo}': {e}")
-        
-    return {"titulo": titulo, "autor": autor, "publicacion": "N/A", "paginas": "N/A", "portada": "", "isbn": "N/A"}
+                if portada_url.startswith("http://"):
+                    portada_url = portada_url.replace("http://", "https://")
+                
+                # Extraer ISBN
+                identifiers = info.get("industryIdentifiers", [])
+                isbn = "N/A"
+                for item in identifiers:
+                    if item.get("type") in ["ISBN_13", "ISBN_10"]:
+                        isbn = item.get("identifier", "N/A")
+                        break
+                if isbn == "N/A" and identifiers:
+                    isbn = identifiers[0].get("identifier", "N/A")
+
+                return {
+                    "titulo": info.get("title", titulo),
+                    "autor": ", ".join(info.get("authors", [autor])),
+                    "publicacion": info.get("publishedDate", "N/A"),
+                    "paginas": str(info.get("pageCount", "N/A")),
+                    "portada": portada_url,
+                    "isbn": isbn
+                }
+        except Exception as e:
+            continue
+
+    # Si tras intentar las consultas no se halla nada en Google Books
+    return {
+        "titulo": titulo,
+        "autor": autor,
+        "publicacion": "N/A",
+        "paginas": "N/A",
+        "portada": "",
+        "isbn": "N/A"
+    }
 
 # --- INTERFAZ DE USUARIO ---
 
