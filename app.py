@@ -14,6 +14,9 @@ st.set_page_config(page_title="Biblioteca Virtual", page_icon="📚", layout="wi
 
 @st.cache_resource
 def obtener_conexion_db():
+    """
+    Crea una conexión persistente a la base de datos SQLite y genera la tabla si no existe.
+    """
     conn = sqlite3.connect("biblioteca.db", check_same_thread=False)
     cursor = conn.cursor()
     cursor.execute("""
@@ -35,19 +38,23 @@ conn = obtener_conexion_db()
 
 def guardar_o_actualizar_libro_db(libro):
     """
-    Inserta el libro o actualiza sus datos si ya existía con campos 'N/A'.
+    Inserta el libro o actualiza sus datos en la BD si ya existía con campos 'N/A' o sin portada.
     """
     cursor = conn.cursor()
     
-    # Buscar si ya existe por título y autor
-    cursor.execute(
-        "SELECT id, publicacion, portada FROM libros WHERE LOWER(titulo) = LOWER(?) AND LOWER(autor) = LOWER(?)", 
-        (libro["titulo"], libro["autor"])
-    )
+    # Comprobar si ya existe por ISBN o combinación Título + Autor
+    if libro["isbn"] != "N/A" and libro["isbn"] != "":
+        cursor.execute("SELECT id, publicacion, portada FROM libros WHERE isbn = ?", (libro["isbn"],))
+    else:
+        cursor.execute(
+            "SELECT id, publicacion, portada FROM libros WHERE LOWER(titulo) = LOWER(?) AND LOWER(autor) = LOWER(?)", 
+            (libro["titulo"], libro["autor"])
+        )
+    
     existente = cursor.fetchone()
 
     if existente is None:
-        # Si no existe, insertar nuevo
+        # Insertar nuevo libro
         cursor.execute("""
             INSERT INTO libros (titulo, autor, publicacion, paginas, portada, isbn)
             VALUES (?, ?, ?, ?, ?, ?)
@@ -55,7 +62,7 @@ def guardar_o_actualizar_libro_db(libro):
         conn.commit()
         return True
     else:
-        # Si ya existe pero tenía datos vacíos o "N/A", actualizarlo
+        # Si ya existe pero tenía datos incompletos y ahora se obtuvieron, actualizar el registro
         libro_id, pub_ant, portada_ant = existente
         if (pub_ant == "N/A" or not portada_ant) and libro["publicacion"] != "N/A":
             cursor.execute("""
@@ -68,12 +75,18 @@ def guardar_o_actualizar_libro_db(libro):
         return False
 
 def obtener_todos_los_libros():
+    """
+    Recupera todos los libros guardados en la base de datos.
+    """
     cursor = conn.cursor()
     cursor.execute("SELECT id, titulo, autor, publicacion, paginas, portada, isbn FROM libros ORDER BY id DESC")
     columnas = ["id", "titulo", "autor", "publicacion", "paginas", "portada", "isbn"]
     return [dict(zip(columnas, fila)) for fila in cursor.fetchall()]
 
 def eliminar_libro_db(libro_id):
+    """
+    Elimina un libro de la base de datos por su ID.
+    """
     cursor = conn.cursor()
     cursor.execute("DELETE FROM libros WHERE id = ?", (libro_id,))
     conn.commit()
@@ -81,6 +94,9 @@ def eliminar_libro_db(libro_id):
 # --- FUNCIONES DE IA Y GOOGLE BOOKS ---
 
 def analizar_imagen_con_gemini(imagen_bytes):
+    """
+    Envía la imagen a Gemini (usando gemini-3.6-flash) para identificar libros y sus autores.
+    """
     api_key = st.secrets.get("GEMINI_API_KEY")
     if not api_key:
         st.error("No se encontró la clave GEMINI_API_KEY en st.secrets.")
@@ -111,7 +127,8 @@ def analizar_imagen_con_gemini(imagen_bytes):
 
 def buscar_en_google_books(titulo, autor=""):
     """
-    Realiza búsquedas en la API de Google Books usando calificadores explícitos (intitle: e inauthor:).
+    Búsqueda según la documentación oficial de Google Books API usando calificadores intitle: e inauthor:.
+    Soporta opcionalmente GOOGLE_BOOKS_API_KEY en los Secrets.
     """
     titulo_clean = titulo.strip() if titulo else ""
     autor_clean = autor.strip() if autor and autor != "Desconocido" else ""
@@ -126,17 +143,21 @@ def buscar_en_google_books(titulo, autor=""):
             "isbn": "N/A"
         }
 
-    # Búsquedas sucesivas en orden de precisión
+    # Búsquedas estructuradas en orden de precisión
     consultas = []
     if autor_clean:
         consultas.append(f'intitle:"{titulo_clean}"+inauthor:"{autor_clean}"')
     consultas.append(f'intitle:"{titulo_clean}"')
     consultas.append(titulo_clean)
 
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+
+    # Parámetro opcional para clave de API de Google Books
+    api_key_books = st.secrets.get("GOOGLE_BOOKS_API_KEY", "")
+    key_param = f"&key={api_key_books}" if api_key_books else ""
 
     for query in consultas:
-        url = f"https://www.googleapis.com/books/v1/volumes?q={requests.utils.quote(query)}&printType=books&maxResults=1"
+        url = f"https://www.googleapis.com/books/v1/volumes?q={requests.utils.quote(query)}&printType=books&maxResults=1{key_param}"
         try:
             res = requests.get(url, headers=headers, timeout=5)
             if res.status_code == 200:
@@ -144,13 +165,13 @@ def buscar_en_google_books(titulo, autor=""):
                 if "items" in datos and len(datos["items"]) > 0:
                     info = datos["items"][0]["volumeInfo"]
                     
-                    # Extraer Portada
+                    # Extraer Portada oficial
                     imagenes = info.get("imageLinks", {})
                     portada_url = imagenes.get("thumbnail") or imagenes.get("smallThumbnail") or ""
                     if portada_url.startswith("http://"):
                         portada_url = portada_url.replace("http://", "https://")
 
-                    # Extraer ISBN
+                    # Extraer ISBN (ISBN_13 o ISBN_10)
                     identifiers = info.get("industryIdentifiers", [])
                     isbn = "N/A"
                     for item in identifiers:
@@ -171,6 +192,7 @@ def buscar_en_google_books(titulo, autor=""):
         except Exception:
             continue
 
+    # Fallback si Google Books no retorna coincidencia
     return {
         "titulo": titulo,
         "autor": autor if autor else "Desconocido",
@@ -193,19 +215,19 @@ if uploaded_file is not None:
         st.image(uploaded_file, caption="Foto subida", use_container_width=True)
     with col2:
         if st.button("🔍 Escanear e Guardar en Biblioteca", type="primary"):
-            with st.spinner("1/2: Analizando imagen con IA..."):
+            with st.spinner("1/2: Analizando imagen con Inteligencia Artificial..."):
                 bytes_data = uploaded_file.getvalue()
                 libros_extraidos = analizar_imagen_con_gemini(bytes_data)
                 
             if libros_extraidos:
                 nuevos_guardados = 0
-                with st.spinner("2/2: Obteniendo datos e imágenes desde Google Books..."):
+                with st.spinner("2/2: Consultando portadas y datos en Google Books..."):
                     for libro_raw in libros_extraidos:
                         detalles = buscar_en_google_books(libro_raw.get("titulo", ""), libro_raw.get("autor", ""))
                         if guardar_o_actualizar_libro_db(detalles):
                             nuevos_guardados += 1
                             
-                st.toast(f"¡{nuevos_guardados} libro(s) procesado(s)/actualizado(s)! ", icon="🎉")
+                st.toast(f"¡{nuevos_guardados} libro(s) procesado(s)/guardado(s)! ", icon="🎉")
                 st.rerun()
 
 st.divider()
