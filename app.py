@@ -127,11 +127,12 @@ def analizar_imagen_con_gemini(imagen_bytes):
 
 def buscar_en_google_books(titulo, autor=""):
     """
-    Búsqueda según la documentación oficial de Google Books API usando calificadores intitle: e inauthor:.
-    Soporta opcionalmente GOOGLE_BOOKS_API_KEY en los Secrets.
+    Realiza la consulta pública a Google Books sin requerir API Key, 
+    evitando bloqueos de credenciales y sanitizando la búsqueda.
     """
-    titulo_clean = titulo.strip() if titulo else ""
-    autor_clean = autor.strip() if autor and autor != "Desconocido" else ""
+    # 1. Sanitizar y limpiar el título y autor
+    titulo_clean = re.sub(r'[^\w\s]', '', titulo).strip() if titulo else ""
+    autor_clean = re.sub(r'[^\w\s]', '', autor).strip() if autor and autor != "Desconocido" else ""
     
     if not titulo_clean:
         return {
@@ -143,7 +144,7 @@ def buscar_en_google_books(titulo, autor=""):
             "isbn": "N/A"
         }
 
-    # Búsquedas estructuradas en orden de precisión
+    # 2. Generar estrategias de búsqueda (Título+Autor, Solo Título, Texto libre)
     consultas = []
     if autor_clean:
         consultas.append(f'intitle:"{titulo_clean}"+inauthor:"{autor_clean}"')
@@ -152,12 +153,9 @@ def buscar_en_google_books(titulo, autor=""):
 
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 
-    # Parámetro opcional para clave de API de Google Books
-    api_key_books = st.secrets.get("GOOGLE_BOOKS_API_KEY", "")
-    key_param = f"&key={api_key_books}" if api_key_books else ""
-
+    # 3. Realizar la petición pública a la API de Google Books (Sin el parámetro &key=)
     for query in consultas:
-        url = f"https://www.googleapis.com/books/v1/volumes?q={requests.utils.quote(query)}&printType=books&maxResults=1{key_param}"
+        url = f"https://www.googleapis.com/books/v1/volumes?q={requests.utils.quote(query)}&printType=books&maxResults=1"
         try:
             res = requests.get(url, headers=headers, timeout=5)
             if res.status_code == 200:
@@ -165,13 +163,13 @@ def buscar_en_google_books(titulo, autor=""):
                 if "items" in datos and len(datos["items"]) > 0:
                     info = datos["items"][0]["volumeInfo"]
                     
-                    # Extraer Portada oficial
+                    # Extraer Portada
                     imagenes = info.get("imageLinks", {})
                     portada_url = imagenes.get("thumbnail") or imagenes.get("smallThumbnail") or ""
                     if portada_url.startswith("http://"):
                         portada_url = portada_url.replace("http://", "https://")
 
-                    # Extraer ISBN (ISBN_13 o ISBN_10)
+                    # Extraer ISBN
                     identifiers = info.get("industryIdentifiers", [])
                     isbn = "N/A"
                     for item in identifiers:
@@ -181,6 +179,7 @@ def buscar_en_google_books(titulo, autor=""):
                     if isbn == "N/A" and identifiers:
                         isbn = identifiers[0].get("identifier", "N/A")
 
+                    # Devuelve los metadatos reales encontrados en Google Books
                     return {
                         "titulo": info.get("title", titulo),
                         "autor": ", ".join(info.get("authors", [autor if autor else "Desconocido"])),
@@ -192,7 +191,7 @@ def buscar_en_google_books(titulo, autor=""):
         except Exception:
             continue
 
-    # Fallback si Google Books no retorna coincidencia
+    # Fallback si no hay coincidencias directas
     return {
         "titulo": titulo,
         "autor": autor if autor else "Desconocido",
@@ -201,7 +200,6 @@ def buscar_en_google_books(titulo, autor=""):
         "portada": "",
         "isbn": "N/A"
     }
-
 # --- INTERFAZ DE USUARIO ---
 
 st.title("📚 Mi Biblioteca Virtual Inteligente")
