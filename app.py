@@ -14,9 +14,6 @@ st.set_page_config(page_title="Biblioteca Virtual", page_icon="📚", layout="wi
 
 @st.cache_resource
 def obtener_conexion_db():
-    """
-    Crea una conexión persistente a la base de datos SQLite y genera la tabla si no existe.
-    """
     conn = sqlite3.connect("biblioteca.db", check_same_thread=False)
     cursor = conn.cursor()
     cursor.execute("""
@@ -37,24 +34,14 @@ def obtener_conexion_db():
 conn = obtener_conexion_db()
 
 def guardar_o_actualizar_libro_db(libro):
-    """
-    Inserta el libro o actualiza sus datos en la BD si ya existía con campos 'N/A' o sin portada.
-    """
     cursor = conn.cursor()
-    
-    # Comprobar si ya existe por ISBN o combinación Título + Autor
-    if libro["isbn"] != "N/A" and libro["isbn"] != "":
-        cursor.execute("SELECT id, publicacion, portada FROM libros WHERE isbn = ?", (libro["isbn"],))
-    else:
-        cursor.execute(
-            "SELECT id, publicacion, portada FROM libros WHERE LOWER(titulo) = LOWER(?) AND LOWER(autor) = LOWER(?)", 
-            (libro["titulo"], libro["autor"])
-        )
-    
+    cursor.execute(
+        "SELECT id, publicacion, portada FROM libros WHERE LOWER(titulo) = LOWER(?) AND LOWER(autor) = LOWER(?)", 
+        (libro["titulo"], libro["autor"])
+    )
     existente = cursor.fetchone()
 
     if existente is None:
-        # Insertar nuevo libro
         cursor.execute("""
             INSERT INTO libros (titulo, autor, publicacion, paginas, portada, isbn)
             VALUES (?, ?, ?, ?, ?, ?)
@@ -62,7 +49,6 @@ def guardar_o_actualizar_libro_db(libro):
         conn.commit()
         return True
     else:
-        # Si ya existe pero tenía datos incompletos y ahora se obtuvieron, actualizar el registro
         libro_id, pub_ant, portada_ant = existente
         if (pub_ant == "N/A" or not portada_ant) and libro["publicacion"] != "N/A":
             cursor.execute("""
@@ -75,18 +61,12 @@ def guardar_o_actualizar_libro_db(libro):
         return False
 
 def obtener_todos_los_libros():
-    """
-    Recupera todos los libros guardados en la base de datos.
-    """
     cursor = conn.cursor()
     cursor.execute("SELECT id, titulo, autor, publicacion, paginas, portada, isbn FROM libros ORDER BY id DESC")
     columnas = ["id", "titulo", "autor", "publicacion", "paginas", "portada", "isbn"]
     return [dict(zip(columnas, fila)) for fila in cursor.fetchall()]
 
 def eliminar_libro_db(libro_id):
-    """
-    Elimina un libro de la base de datos por su ID.
-    """
     cursor = conn.cursor()
     cursor.execute("DELETE FROM libros WHERE id = ?", (libro_id,))
     conn.commit()
@@ -94,9 +74,6 @@ def eliminar_libro_db(libro_id):
 # --- FUNCIONES DE IA Y GOOGLE BOOKS ---
 
 def analizar_imagen_con_gemini(imagen_bytes):
-    """
-    Envía la imagen a Gemini (usando gemini-3.6-flash) para identificar libros y sus autores.
-    """
     api_key = st.secrets.get("GEMINI_API_KEY")
     if not api_key:
         st.error("No se encontró la clave GEMINI_API_KEY en st.secrets.")
@@ -127,49 +104,39 @@ def analizar_imagen_con_gemini(imagen_bytes):
 
 def buscar_en_google_books(titulo, autor=""):
     """
-    Realiza la consulta pública a Google Books sin requerir API Key, 
-    evitando bloqueos de credenciales y sanitizando la búsqueda.
+    Búsqueda directa y limpia en la API pública de Google Books.
     """
-    # 1. Sanitizar y limpiar el título y autor
-    titulo_clean = re.sub(r'[^\w\s]', '', titulo).strip() if titulo else ""
-    autor_clean = re.sub(r'[^\w\s]', '', autor).strip() if autor and autor != "Desconocido" else ""
+    titulo_clean = re.sub(r'[^\w\s]', ' ', titulo).strip() if titulo else ""
+    autor_clean = re.sub(r'[^\w\s]', ' ', autor).strip() if autor and autor != "Desconocido" else ""
     
-    if not titulo_clean:
-        return {
-            "titulo": "Desconocido",
-            "autor": autor_clean or "Desconocido",
-            "publicacion": "N/A",
-            "paginas": "N/A",
-            "portada": "",
-            "isbn": "N/A"
-        }
-
-    # 2. Generar estrategias de búsqueda (Título+Autor, Solo Título, Texto libre)
+    # Lista de términos a probar sin caracteres raros de formato
     consultas = []
-    if autor_clean:
-        consultas.append(f'intitle:"{titulo_clean}"+inauthor:"{autor_clean}"')
-    consultas.append(f'intitle:"{titulo_clean}"')
-    consultas.append(titulo_clean)
+    if titulo_clean and autor_clean:
+        consultas.append(f"{titulo_clean} {autor_clean}")
+    if titulo_clean:
+        consultas.append(titulo_clean)
 
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    headers = {"User-Agent": "Mozilla/5.0"}
 
-    # 3. Realizar la petición pública a la API de Google Books (Sin el parámetro &key=)
     for query in consultas:
-        url = f"https://www.googleapis.com/books/v1/volumes?q={requests.utils.quote(query)}&printType=books&maxResults=1"
+        # Petición pública sin parámetro key= para evitar error 400/403
+        params = {
+            "q": query,
+            "maxResults": 1,
+            "printType": "books"
+        }
         try:
-            res = requests.get(url, headers=headers, timeout=5)
+            res = requests.get("https://www.googleapis.com/books/v1/volumes", params=params, headers=headers, timeout=5)
             if res.status_code == 200:
                 datos = res.json()
                 if "items" in datos and len(datos["items"]) > 0:
                     info = datos["items"][0]["volumeInfo"]
                     
-                    # Extraer Portada
                     imagenes = info.get("imageLinks", {})
                     portada_url = imagenes.get("thumbnail") or imagenes.get("smallThumbnail") or ""
                     if portada_url.startswith("http://"):
                         portada_url = portada_url.replace("http://", "https://")
 
-                    # Extraer ISBN
                     identifiers = info.get("industryIdentifiers", [])
                     isbn = "N/A"
                     for item in identifiers:
@@ -179,7 +146,6 @@ def buscar_en_google_books(titulo, autor=""):
                     if isbn == "N/A" and identifiers:
                         isbn = identifiers[0].get("identifier", "N/A")
 
-                    # Devuelve los metadatos reales encontrados en Google Books
                     return {
                         "titulo": info.get("title", titulo),
                         "autor": ", ".join(info.get("authors", [autor if autor else "Desconocido"])),
@@ -191,7 +157,6 @@ def buscar_en_google_books(titulo, autor=""):
         except Exception:
             continue
 
-    # Fallback si no hay coincidencias directas
     return {
         "titulo": titulo,
         "autor": autor if autor else "Desconocido",
@@ -200,6 +165,7 @@ def buscar_en_google_books(titulo, autor=""):
         "portada": "",
         "isbn": "N/A"
     }
+
 # --- INTERFAZ DE USUARIO ---
 
 st.title("📚 Mi Biblioteca Virtual Inteligente")
