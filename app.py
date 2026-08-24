@@ -90,7 +90,7 @@ def analizar_imagen_con_gemini(imagen_bytes):
 
     try:
         response = client.models.generate_content(
-            model='gemini-3.6-flash',
+            model='gemini-3.1-flash',
             contents=[
                 types.Part.from_bytes(data=imagen_bytes, mime_type="image/jpeg"),
                 prompt
@@ -103,13 +103,11 @@ def analizar_imagen_con_gemini(imagen_bytes):
         return []
 
 def buscar_en_google_books(titulo, autor=""):
-    """
-    Búsqueda directa y limpia en la API pública de Google Books.
-    """
+    api_key = st.secrets.get("GOOGLE_BOOKS_API_KEY")  # tenías la clave huérfana, ahora se usa
+
     titulo_clean = re.sub(r'[^\w\s]', ' ', titulo).strip() if titulo else ""
     autor_clean = re.sub(r'[^\w\s]', ' ', autor).strip() if autor and autor != "Desconocido" else ""
-    
-    # Lista de términos a probar sin caracteres raros de formato
+
     consultas = []
     if titulo_clean and autor_clean:
         consultas.append(f"{titulo_clean} {autor_clean}")
@@ -119,51 +117,52 @@ def buscar_en_google_books(titulo, autor=""):
     headers = {"User-Agent": "Mozilla/5.0"}
 
     for query in consultas:
-        # Petición pública sin parámetro key= para evitar error 400/403
-        params = {
-            "q": query,
-            "maxResults": 1,
-            "printType": "books"
-        }
+        params = {"q": query, "maxResults": 1, "printType": "books"}
+        if api_key:
+            params["key"] = api_key  # esto es lo que faltaba
+
         try:
-            res = requests.get("https://www.googleapis.com/books/v1/volumes", params=params, headers=headers, timeout=5)
-            if res.status_code == 200:
-                datos = res.json()
-                if "items" in datos and len(datos["items"]) > 0:
-                    info = datos["items"][0]["volumeInfo"]
-                    
-                    imagenes = info.get("imageLinks", {})
-                    portada_url = imagenes.get("thumbnail") or imagenes.get("smallThumbnail") or ""
-                    if portada_url.startswith("http://"):
-                        portada_url = portada_url.replace("http://", "https://")
+            res = requests.get(
+                "https://www.googleapis.com/books/v1/volumes",
+                params=params, headers=headers, timeout=5
+            )
+            # NO silencies el error: míralo
+            if res.status_code != 200:
+                st.warning(f"Google Books devolvió {res.status_code} para '{query}': {res.text[:200]}")
+                continue
 
-                    identifiers = info.get("industryIdentifiers", [])
-                    isbn = "N/A"
-                    for item in identifiers:
-                        if item.get("type") in ["ISBN_13", "ISBN_10"]:
-                            isbn = item.get("identifier", "N/A")
-                            break
-                    if isbn == "N/A" and identifiers:
-                        isbn = identifiers[0].get("identifier", "N/A")
+            datos = res.json()
+            if "items" in datos and len(datos["items"]) > 0:
+                info = datos["items"][0]["volumeInfo"]
+                imagenes = info.get("imageLinks", {})
+                portada_url = imagenes.get("thumbnail") or imagenes.get("smallThumbnail") or ""
+                if portada_url.startswith("http://"):
+                    portada_url = portada_url.replace("http://", "https://")
 
-                    return {
-                        "titulo": info.get("title", titulo),
-                        "autor": ", ".join(info.get("authors", [autor if autor else "Desconocido"])),
-                        "publicacion": info.get("publishedDate", "N/A"),
-                        "paginas": str(info.get("pageCount", "N/A")),
-                        "portada": portada_url,
-                        "isbn": isbn
-                    }
-        except Exception:
+                identifiers = info.get("industryIdentifiers", [])
+                isbn = "N/A"
+                for item in identifiers:
+                    if item.get("type") in ["ISBN_13", "ISBN_10"]:
+                        isbn = item.get("identifier", "N/A")
+                        break
+                if isbn == "N/A" and identifiers:
+                    isbn = identifiers[0].get("identifier", "N/A")
+
+                return {
+                    "titulo": info.get("title", titulo),
+                    "autor": ", ".join(info.get("authors", [autor if autor else "Desconocido"])),
+                    "publicacion": info.get("publishedDate", "N/A"),
+                    "paginas": str(info.get("pageCount", "N/A")),
+                    "portada": portada_url,
+                    "isbn": isbn
+                }
+        except Exception as e:
+            st.warning(f"Excepción real en la petición: {e}")
             continue
 
     return {
-        "titulo": titulo,
-        "autor": autor if autor else "Desconocido",
-        "publicacion": "N/A",
-        "paginas": "N/A",
-        "portada": "",
-        "isbn": "N/A"
+        "titulo": titulo, "autor": autor if autor else "Desconocido",
+        "publicacion": "N/A", "paginas": "N/A", "portada": "", "isbn": "N/A"
     }
 
 # --- INTERFAZ DE USUARIO ---
