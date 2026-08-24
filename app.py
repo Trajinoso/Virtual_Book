@@ -103,7 +103,8 @@ def analizar_imagen_con_gemini(imagen_bytes):
         return []
 
 def buscar_en_google_books(titulo, autor=""):
-    api_key = st.secrets.get("GOOGLE_BOOKS_API_KEY")  # tenías la clave huérfana, ahora se usa
+    api_key = st.secrets.get("GOOGLE_BOOKS_API_KEY")
+    st.session_state.setdefault("debug_log", [])
 
     titulo_clean = re.sub(r'[^\w\s]', ' ', titulo).strip() if titulo else ""
     autor_clean = re.sub(r'[^\w\s]', ' ', autor).strip() if autor and autor != "Desconocido" else ""
@@ -119,16 +120,18 @@ def buscar_en_google_books(titulo, autor=""):
     for query in consultas:
         params = {"q": query, "maxResults": 1, "printType": "books"}
         if api_key:
-            params["key"] = api_key  # esto es lo que faltaba
+            params["key"] = api_key
 
         try:
             res = requests.get(
                 "https://www.googleapis.com/books/v1/volumes",
                 params=params, headers=headers, timeout=5
             )
-            # NO silencies el error: míralo
+            st.session_state["debug_log"].append(
+                f"[{titulo}] query='{query}' -> status={res.status_code} | {res.text[:200]}"
+            )
+
             if res.status_code != 200:
-                st.warning(f"Google Books devolvió {res.status_code} para '{query}': {res.text[:200]}")
                 continue
 
             datos = res.json()
@@ -157,17 +160,23 @@ def buscar_en_google_books(titulo, autor=""):
                     "isbn": isbn
                 }
         except Exception as e:
-            st.warning(f"Excepción real en la petición: {e}")
+            st.session_state["debug_log"].append(f"[{titulo}] EXCEPCIÓN: {e}")
             continue
 
     return {
         "titulo": titulo, "autor": autor if autor else "Desconocido",
         "publicacion": "N/A", "paginas": "N/A", "portada": "", "isbn": "N/A"
     }
-
 # --- INTERFAZ DE USUARIO ---
 
 st.title("📚 Mi Biblioteca Virtual Inteligente")
+if st.session_state.get("debug_log"):
+    with st.expander(f"🔧 Debug Google Books ({len(st.session_state['debug_log'])} peticiones)", expanded=True):
+        for linea in st.session_state["debug_log"]:
+            st.code(linea)
+        if st.button("Limpiar log"):
+            st.session_state["debug_log"] = []
+            st.rerun()
 st.write("Sube la foto de un libro o de una estantería completa para catalogarla.")
 
 uploaded_file = st.file_uploader("Captura o sube la foto aquí...", type=["jpg", "jpeg", "png"])
