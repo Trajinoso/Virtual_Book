@@ -111,10 +111,8 @@ def analizar_imagen_con_gemini(imagen_bytes):
 
 def buscar_en_google_books(titulo, autor=""):
     """
-    Búsqueda estructurada según la documentación oficial de Google Books API.
-    Utiliza calificadores `intitle:` e `inauthor:` para garantizar coincidencias.
+    Realiza búsquedas en la API de Google Books usando calificadores explícitos (intitle: e inauthor:).
     """
-    # 1. Limpieza de cadenas
     titulo_clean = titulo.strip() if titulo else ""
     autor_clean = autor.strip() if autor and autor != "Desconocido" else ""
     
@@ -128,12 +126,8 @@ def buscar_en_google_books(titulo, autor=""):
             "isbn": "N/A"
         }
 
-    # 2. Construir intentos de búsqueda siguiendo los estándares de Google Books
-    # Intento A: q=intitle:"Título"+inauthor:"Autor"&printType=books
-    # Intento B: q=intitle:"Título"&printType=books
-    # Intento C: Búsqueda libre amplia q="Título"
+    # Búsquedas sucesivas en orden de precisión
     consultas = []
-    
     if autor_clean:
         consultas.append(f'intitle:"{titulo_clean}"+inauthor:"{autor_clean}"')
     consultas.append(f'intitle:"{titulo_clean}"')
@@ -142,7 +136,6 @@ def buscar_en_google_books(titulo, autor=""):
     headers = {"User-Agent": "Mozilla/5.0"}
 
     for query in consultas:
-        # Petición HTTP GET cumpliendo la documentación de la API
         url = f"https://www.googleapis.com/books/v1/volumes?q={requests.utils.quote(query)}&printType=books&maxResults=1"
         try:
             res = requests.get(url, headers=headers, timeout=5)
@@ -151,13 +144,13 @@ def buscar_en_google_books(titulo, autor=""):
                 if "items" in datos and len(datos["items"]) > 0:
                     info = datos["items"][0]["volumeInfo"]
                     
-                    # Extraer Portada oficial
+                    # Extraer Portada
                     imagenes = info.get("imageLinks", {})
                     portada_url = imagenes.get("thumbnail") or imagenes.get("smallThumbnail") or ""
                     if portada_url.startswith("http://"):
                         portada_url = portada_url.replace("http://", "https://")
 
-                    # Extraer ISBN (ISBN_13 o ISBN_10)
+                    # Extraer ISBN
                     identifiers = info.get("industryIdentifiers", [])
                     isbn = "N/A"
                     for item in identifiers:
@@ -167,7 +160,6 @@ def buscar_en_google_books(titulo, autor=""):
                     if isbn == "N/A" and identifiers:
                         isbn = identifiers[0].get("identifier", "N/A")
 
-                    # Si obtuvimos un resultado válido en Google Books
                     return {
                         "titulo": info.get("title", titulo),
                         "autor": ", ".join(info.get("authors", [autor if autor else "Desconocido"])),
@@ -179,7 +171,6 @@ def buscar_en_google_books(titulo, autor=""):
         except Exception:
             continue
 
-    # Si Google Books no devuelve nada tras todos los intentos, conservar los datos leídos por Gemini
     return {
         "titulo": titulo,
         "autor": autor if autor else "Desconocido",
