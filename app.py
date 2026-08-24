@@ -90,7 +90,7 @@ def analizar_imagen_con_gemini(imagen_bytes):
 
     try:
         response = client.models.generate_content(
-            model='gemini-3.1-flash',
+            model='gemini-3.6-flash',
             contents=[
                 types.Part.from_bytes(data=imagen_bytes, mime_type="image/jpeg"),
                 prompt
