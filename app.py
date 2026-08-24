@@ -118,7 +118,7 @@ def buscar_en_google_books(titulo, autor=""):
     headers = {"User-Agent": "Mozilla/5.0"}
 
     for query in consultas:
-        params = {"q": query, "maxResults": 1, "printType": "books"}
+        params = {"q": query, "maxResults": 1, "printType": "books", "country": "ES"}
         if api_key:
             params["key"] = api_key
 
