@@ -3,6 +3,7 @@ import pandas as pd
 import requests
 import json
 import sqlite3
+import re
 from google import genai
 from google.genai import types
 
@@ -32,23 +33,39 @@ def obtener_conexion_db():
 
 conn = obtener_conexion_db()
 
-def guardar_libro_db(libro):
+def guardar_o_actualizar_libro_db(libro):
+    """
+    Inserta el libro o actualiza sus datos si ya existía con campos 'N/A'.
+    """
     cursor = conn.cursor()
     
-    # Comprobar duplicados por ISBN o combinación Título + Autor
-    if libro["isbn"] != "N/A" and libro["isbn"] != "":
-        cursor.execute("SELECT id FROM libros WHERE isbn = ?", (libro["isbn"],))
-    else:
-        cursor.execute("SELECT id FROM libros WHERE LOWER(titulo) = LOWER(?) AND LOWER(autor) = LOWER(?)", (libro["titulo"], libro["autor"]))
-        
-    if cursor.fetchone() is None:
+    # Buscar si ya existe por título y autor
+    cursor.execute(
+        "SELECT id, publicacion, portada FROM libros WHERE LOWER(titulo) = LOWER(?) AND LOWER(autor) = LOWER(?)", 
+        (libro["titulo"], libro["autor"])
+    )
+    existente = cursor.fetchone()
+
+    if existente is None:
+        # Si no existe, insertar nuevo
         cursor.execute("""
             INSERT INTO libros (titulo, autor, publicacion, paginas, portada, isbn)
             VALUES (?, ?, ?, ?, ?, ?)
         """, (libro["titulo"], libro["autor"], libro["publicacion"], libro["paginas"], libro["portada"], libro["isbn"]))
         conn.commit()
         return True
-    return False
+    else:
+        # Si ya existe pero tenía datos vacíos o "N/A", actualizarlo
+        libro_id, pub_ant, portada_ant = existente
+        if (pub_ant == "N/A" or not portada_ant) and libro["publicacion"] != "N/A":
+            cursor.execute("""
+                UPDATE libros 
+                SET titulo = ?, autor = ?, publicacion = ?, paginas = ?, portada = ?, isbn = ?
+                WHERE id = ?
+            """, (libro["titulo"], libro["autor"], libro["publicacion"], libro["paginas"], libro["portada"], libro["isbn"], libro_id))
+            conn.commit()
+            return True
+        return False
 
 def obtener_todos_los_libros():
     cursor = conn.cursor()
@@ -94,58 +111,55 @@ def analizar_imagen_con_gemini(imagen_bytes):
 
 def buscar_en_google_books(titulo, autor=""):
     """
-    Realiza una búsqueda inteligente en la API de Google Books.
-    Si falla la búsqueda estricta, reintenta buscando únicamente por el título.
+    Búsqueda robusta en la API pública de Google Books.
     """
-    titulo_clean = titulo.strip() if titulo else ""
-    autor_clean = autor.strip() if autor and autor != "Desconocido" else ""
-    
-    # 1. Intentos de búsqueda: Primero Título + Autor, luego solo Título
+    # Limpiar signos o caracteres raros para la consulta
+    titulo_clean = re.sub(r'[^\w\s]', '', titulo).strip()
+    autor_clean = re.sub(r'[^\w\s]', '', autor).strip() if autor and autor != "Desconocido" else ""
+
+    # Estrategia de consultas sucesivas: 1º Título + Autor, 2º Solo Título
     consultas = []
     if titulo_clean and autor_clean:
         consultas.append(f"{titulo_clean} {autor_clean}")
     if titulo_clean:
         consultas.append(titulo_clean)
 
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 
-    for query in consultas:
-        url = f"https://www.googleapis.com/books/v1/volumes?q={requests.utils.quote(query)}&maxResults=1"
+    for q in consultas:
+        url = f"https://www.googleapis.com/books/v1/volumes?q={requests.utils.quote(q)}&maxResults=1"
         try:
             res = requests.get(url, headers=headers, timeout=5)
-            datos = res.json()
-            
-            if "items" in datos and len(datos["items"]) > 0:
-                info = datos["items"][0]["volumeInfo"]
-                imagenes = info.get("imageLinks", {})
-                portada_url = imagenes.get("thumbnail") or imagenes.get("smallThumbnail") or ""
-                
-                if portada_url.startswith("http://"):
-                    portada_url = portada_url.replace("http://", "https://")
-                
-                # Extraer ISBN
-                identifiers = info.get("industryIdentifiers", [])
-                isbn = "N/A"
-                for item in identifiers:
-                    if item.get("type") in ["ISBN_13", "ISBN_10"]:
-                        isbn = item.get("identifier", "N/A")
-                        break
-                if isbn == "N/A" and identifiers:
-                    isbn = identifiers[0].get("identifier", "N/A")
+            if res.status_code == 200:
+                datos = res.json()
+                if "items" in datos and len(datos["items"]) > 0:
+                    info = datos["items"][0]["volumeInfo"]
+                    
+                    # Portada
+                    imagenes = info.get("imageLinks", {})
+                    portada_url = imagenes.get("thumbnail") or imagenes.get("smallThumbnail") or ""
+                    if portada_url.startswith("http://"):
+                        portada_url = portada_url.replace("http://", "https://")
 
-                # Devolver los datos obtenidos
-                return {
-                    "titulo": info.get("title", titulo),
-                    "autor": ", ".join(info.get("authors", [autor if autor else "Desconocido"])),
-                    "publicacion": info.get("publishedDate", "N/A"),
-                    "paginas": str(info.get("pageCount", "N/A")),
-                    "portada": portada_url,
-                    "isbn": isbn
-                }
+                    # ISBN
+                    identifiers = info.get("industryIdentifiers", [])
+                    isbn = "N/A"
+                    for item in identifiers:
+                        if item.get("type") in ["ISBN_13", "ISBN_10"]:
+                            isbn = item.get("identifier", "N/A")
+                            break
+
+                    return {
+                        "titulo": info.get("title", titulo),
+                        "autor": ", ".join(info.get("authors", [autor if autor else "Desconocido"])),
+                        "publicacion": info.get("publishedDate", "N/A"),
+                        "paginas": str(info.get("pageCount", "N/A")),
+                        "portada": portada_url,
+                        "isbn": isbn
+                    }
         except Exception:
             continue
 
-    # Si tras intentar las búsquedas Google Books no devuelve nada, conservar título y autor de Gemini
     return {
         "titulo": titulo,
         "autor": autor if autor else "Desconocido",
@@ -168,19 +182,19 @@ if uploaded_file is not None:
         st.image(uploaded_file, caption="Foto subida", use_container_width=True)
     with col2:
         if st.button("🔍 Escanear e Guardar en Biblioteca", type="primary"):
-            with st.spinner("1/2: Analizando imagen con Inteligencia Artificial..."):
+            with st.spinner("1/2: Analizando imagen con IA..."):
                 bytes_data = uploaded_file.getvalue()
                 libros_extraidos = analizar_imagen_con_gemini(bytes_data)
                 
             if libros_extraidos:
                 nuevos_guardados = 0
-                with st.spinner("2/2: Obteniendo portadas y datos desde Google Books..."):
+                with st.spinner("2/2: Obteniendo datos e imágenes desde Google Books..."):
                     for libro_raw in libros_extraidos:
                         detalles = buscar_en_google_books(libro_raw.get("titulo", ""), libro_raw.get("autor", ""))
-                        if guardar_libro_db(detalles):
+                        if guardar_o_actualizar_libro_db(detalles):
                             nuevos_guardados += 1
                             
-                st.toast(f"¡{nuevos_guardados} libro(s) procesado(s) correctamente!", icon="🎉")
+                st.toast(f"¡{nuevos_guardados} libro(s) procesado(s)/actualizado(s)! ", icon="🎉")
                 st.rerun()
 
 st.divider()
