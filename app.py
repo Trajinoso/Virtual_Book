@@ -4,10 +4,10 @@ import requests
 import json
 import sqlite3
 import re
+import unicodedata
 from google import genai
 from google.genai import types
 
-# Configuración de la página
 st.set_page_config(page_title="Biblioteca Virtual", page_icon="📚", layout="wide")
 
 # --- BASE DE DATOS (SQLite) ---
@@ -24,7 +24,6 @@ def obtener_conexion_db():
             publicacion TEXT,
             paginas TEXT,
             portada TEXT,
-            isbn TEXT,
             fecha_registro TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
@@ -33,37 +32,43 @@ def obtener_conexion_db():
 
 conn = obtener_conexion_db()
 
-def guardar_o_actualizar_libro_db(libro):
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT id, publicacion, portada FROM libros WHERE LOWER(titulo) = LOWER(?) AND LOWER(autor) = LOWER(?)", 
-        (libro["titulo"], libro["autor"])
-    )
-    existente = cursor.fetchone()
+def normalizar(texto):
+    """Normaliza para comparar: sin tildes, minúsculas, sin puntuación, espacios colapsados."""
+    if not texto:
+        return ""
+    texto = texto.lower().strip()
+    texto = unicodedata.normalize('NFKD', texto).encode('ascii', 'ignore').decode('utf-8')
+    texto = re.sub(r'[^\w\s]', '', texto)
+    texto = re.sub(r'\s+', ' ', texto)
+    return texto
 
-    if existente is None:
-        cursor.execute("""
-            INSERT INTO libros (titulo, autor, publicacion, paginas, portada, isbn)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (libro["titulo"], libro["autor"], libro["publicacion"], libro["paginas"], libro["portada"], libro["isbn"]))
-        conn.commit()
-        return True
-    else:
-        libro_id, pub_ant, portada_ant = existente
-        if (pub_ant == "N/A" or not portada_ant) and libro["publicacion"] != "N/A":
-            cursor.execute("""
-                UPDATE libros 
-                SET titulo = ?, autor = ?, publicacion = ?, paginas = ?, portada = ?, isbn = ?
-                WHERE id = ?
-            """, (libro["titulo"], libro["autor"], libro["publicacion"], libro["paginas"], libro["portada"], libro["isbn"], libro_id))
-            conn.commit()
+def libro_ya_existe(titulo, autor):
+    """Compara contra todo lo guardado usando normalización, no comparación exacta."""
+    cursor = conn.cursor()
+    cursor.execute("SELECT titulo, autor FROM libros")
+    t_norm = normalizar(titulo)
+    a_norm = normalizar(autor)
+    for t_db, a_db in cursor.fetchall():
+        if normalizar(t_db) == t_norm and normalizar(a_db) == a_norm:
             return True
-        return False
+    return False
+
+def guardar_libro_db(libro):
+    if libro_ya_existe(libro["titulo"], libro["autor"]):
+        return False  # ya está, no se toca ni se duplica
+
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO libros (titulo, autor, publicacion, paginas, portada)
+        VALUES (?, ?, ?, ?, ?)
+    """, (libro["titulo"], libro["autor"], libro["publicacion"], libro["paginas"], libro["portada"]))
+    conn.commit()
+    return True
 
 def obtener_todos_los_libros():
     cursor = conn.cursor()
-    cursor.execute("SELECT id, titulo, autor, publicacion, paginas, portada, isbn FROM libros ORDER BY id DESC")
-    columnas = ["id", "titulo", "autor", "publicacion", "paginas", "portada", "isbn"]
+    cursor.execute("SELECT id, titulo, autor, publicacion, paginas, portada FROM libros ORDER BY id DESC")
+    columnas = ["id", "titulo", "autor", "publicacion", "paginas", "portada"]
     return [dict(zip(columnas, fila)) for fila in cursor.fetchall()]
 
 def eliminar_libro_db(libro_id):
@@ -87,10 +92,9 @@ def analizar_imagen_con_gemini(imagen_bytes):
     Si no sabes el autor, pon "Desconocido".
     Ejemplo: [{"titulo": "La montaña hueca", "autor": "B. Catling"}]
     """
-
     try:
         response = client.models.generate_content(
-            model='gemini-3.6-flash',
+            model='gemini-3.5-flash',
             contents=[
                 types.Part.from_bytes(data=imagen_bytes, mime_type="image/jpeg"),
                 prompt
@@ -102,88 +106,82 @@ def analizar_imagen_con_gemini(imagen_bytes):
         st.error(f"Error al analizar la imagen con IA: {e}")
         return []
 
+def _consultar_google_books(query, headers, restringir_es):
+    params = {"q": query, "maxResults": 1, "printType": "books", "country": "ES"}
+    if restringir_es:
+        params["langRestrict"] = "es"
+
+    res = requests.get(
+        "https://www.googleapis.com/books/v1/volumes",
+        params=params, headers=headers, timeout=5
+    )
+    if res.status_code != 200:
+        return None
+    items = res.json().get("items", [])
+    return items[0].get("volumeInfo") if items else None
+
 def buscar_en_google_books(titulo, autor=""):
     """
-    Realiza la búsqueda de metadatos y portadas utilizando Open Library API.
-    Evita los bloqueos de geolocalización (403) de Google Books en servidores Cloud.
+    Búsqueda pública en Google Books, sin API key.
+    Prioriza la edición en español (langRestrict=es); si no existe,
+    cae a la búsqueda sin restricción para no perder el libro entero.
     """
+    st.session_state.setdefault("debug_log", [])
+
     titulo_clean = re.sub(r'[^\w\s]', ' ', titulo).strip() if titulo else ""
     autor_clean = re.sub(r'[^\w\s]', ' ', autor).strip() if autor and autor != "Desconocido" else ""
-    
-    if not titulo_clean:
-        return {
-            "titulo": "Desconocido",
-            "autor": autor_clean or "Desconocido",
-            "publicacion": "N/A",
-            "paginas": "N/A",
-            "portada": "",
-            "isbn": "N/A"
-        }
 
-    # Intentos de consulta en Open Library
     consultas = []
     if titulo_clean and autor_clean:
-        consultas.append({"title": titulo_clean, "author": autor_clean})
-    consultas.append({"title": titulo_clean})
+        consultas.append(f"{titulo_clean} {autor_clean}")
+    if titulo_clean:
+        consultas.append(titulo_clean)
 
-    headers = {"User-Agent": "BibliotecaVirtualApp/1.0"}
+    headers = {"User-Agent": "Mozilla/5.0"}
 
-    for params in consultas:
-        url = "https://openlibrary.org/search.json"
-        try:
-            res = requests.get(url, params=params, headers=headers, timeout=5)
-            if res.status_code == 200:
-                datos = res.json()
-                docs = datos.get("docs", [])
-                if docs:
-                    libro = docs[0]
-                    
-                    # Portada (Open Library Cover API)
-                    cover_i = libro.get("cover_i")
-                    portada_url = f"https://covers.openlibrary.org/b/id/{cover_i}-L.jpg" if cover_i else ""
+    for query in consultas:
+        for restringir_es in (True, False):
+            try:
+                info = _consultar_google_books(query, headers, restringir_es)
+                st.session_state["debug_log"].append(
+                    f"[{titulo}] query='{query}' es_only={restringir_es} -> {'OK' if info else 'sin resultado'}"
+                )
+                if info is None:
+                    continue
 
-                    # ISBN
-                    isbns = libro.get("isbn", [])
-                    isbn = isbns[0] if isbns else "N/A"
+                imagenes = info.get("imageLinks", {})
+                portada_url = imagenes.get("thumbnail") or imagenes.get("smallThumbnail") or ""
+                if portada_url.startswith("http://"):
+                    portada_url = portada_url.replace("http://", "https://")
 
-                    # Fecha de publicación
-                    pub_date = str(libro.get("first_publish_year") or "N/A")
-
-                    # Número de páginas (si no está disponible en la lista de docs)
-                    num_paginas = str(libro.get("number_of_pages_median") or "N/A")
-
-                    # Autores
-                    autores_list = libro.get("author_name", [autor if autor else "Desconocido"])
-
-                    return {
-                        "titulo": libro.get("title", titulo),
-                        "autor": ", ".join(autores_list[:2]),
-                        "publicacion": pub_date,
-                        "paginas": num_paginas,
-                        "portada": portada_url,
-                        "isbn": isbn
-                    }
-        except Exception:
-            continue
+                return {
+                    "titulo": info.get("title", titulo),
+                    "autor": ", ".join(info.get("authors", [autor if autor else "Desconocido"])),
+                    "publicacion": info.get("publishedDate", "N/A"),
+                    "paginas": str(info.get("pageCount", "N/A")),
+                    "portada": portada_url,
+                }
+            except Exception as e:
+                st.session_state["debug_log"].append(f"[{titulo}] EXCEPCIÓN: {e}")
+                continue
 
     return {
-        "titulo": titulo,
-        "autor": autor if autor else "Desconocido",
-        "publicacion": "N/A",
-        "paginas": "N/A",
-        "portada": "",
-        "isbn": "N/A"
+        "titulo": titulo, "autor": autor if autor else "Desconocido",
+        "publicacion": "N/A", "paginas": "N/A", "portada": ""
     }
+
 # --- INTERFAZ DE USUARIO ---
 
 st.title("📚 Mi Biblioteca Virtual Inteligente")
+
 if st.session_state.get("debug_log"):
-    with st.expander(f"🔧 Debug Google Books ({len(st.session_state['debug_log'])} peticiones)", expanded=True):
+    with st.expander(f"🔧 Debug Google Books ({len(st.session_state['debug_log'])} peticiones)"):
         for linea in st.session_state["debug_log"]:
             st.code(linea)
         if st.button("Limpiar log"):
             st.session_state["debug_log"] = []
             st.rerun()
+
 st.write("Sube la foto de un libro o de una estantería completa para catalogarla.")
 
 uploaded_file = st.file_uploader("Captura o sube la foto aquí...", type=["jpg", "jpeg", "png"])
@@ -197,16 +195,24 @@ if uploaded_file is not None:
             with st.spinner("1/2: Analizando imagen con Inteligencia Artificial..."):
                 bytes_data = uploaded_file.getvalue()
                 libros_extraidos = analizar_imagen_con_gemini(bytes_data)
-                
+
             if libros_extraidos:
                 nuevos_guardados = 0
-                with st.spinner("2/2: Consultando portadas y datos en Google Books..."):
+                omitidos = 0
+                with st.spinner("2/2: Consultando datos en Google Books..."):
                     for libro_raw in libros_extraidos:
-                        detalles = buscar_en_google_books(libro_raw.get("titulo", ""), libro_raw.get("autor", ""))
-                        if guardar_o_actualizar_libro_db(detalles):
+                        titulo_bruto = libro_raw.get("titulo", "")
+                        autor_bruto = libro_raw.get("autor", "")
+
+                        if libro_ya_existe(titulo_bruto, autor_bruto):
+                            omitidos += 1
+                            continue
+
+                        detalles = buscar_en_google_books(titulo_bruto, autor_bruto)
+                        if guardar_libro_db(detalles):
                             nuevos_guardados += 1
-                            
-                st.toast(f"¡{nuevos_guardados} libro(s) procesado(s)/guardado(s)! ", icon="🎉")
+
+                st.toast(f"¡{nuevos_guardados} libro(s) nuevo(s)! {omitidos} ya estaban en tu biblioteca.", icon="🎉")
                 st.rerun()
 
 st.divider()
@@ -231,6 +237,6 @@ if libros_guardados:
 
     with st.expander("Ver base de datos en formato tabla"):
         df = pd.DataFrame(libros_guardados)
-        st.dataframe(df[["id", "titulo", "autor", "publicacion", "paginas", "isbn"]], use_container_width=True)
+        st.dataframe(df, use_container_width=True)
 else:
     st.info("Aún no has escaneado ningún libro. Sube una foto arriba para empezar.")
