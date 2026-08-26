@@ -115,10 +115,8 @@ def _consultar_google_books(query, headers, restringir_es):
         "https://www.googleapis.com/books/v1/volumes",
         params=params, headers=headers, timeout=5
     )
-    if res.status_code != 200:
-        return None
-    items = res.json().get("items", [])
-    return items[0].get("volumeInfo") if items else None
+    # Devuelve también el status y el cuerpo, no solo el resultado final
+    return res.status_code, res.text, (res.json().get("items", []) if res.status_code == 200 else [])
 
 def buscar_en_google_books(titulo, autor=""):
     """
@@ -142,9 +140,10 @@ def buscar_en_google_books(titulo, autor=""):
     for query in consultas:
         for restringir_es in (True, False):
             try:
-                info = _consultar_google_books(query, headers, restringir_es)
+               status, texto, items = _consultar_google_books(query, headers, restringir_es)
                 st.session_state["debug_log"].append(
-                    f"[{titulo}] query='{query}' es_only={restringir_es} -> {'OK' if info else 'sin resultado'}"
+                    f"[{titulo}] query='{query}' es_only={restringir_es} status={status} "
+                    f"items={len(items)} | {texto[:150] if status != 200 else ''}"
                 )
                 if info is None:
                     continue
