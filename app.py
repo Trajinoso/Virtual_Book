@@ -107,9 +107,13 @@ def analizar_imagen_con_gemini(imagen_bytes):
         return []
 
 def _consultar_google_books(query, headers, restringir_es):
+    api_key = st.secrets.get("GOOGLE_BOOKS_API_KEY")
+
     params = {"q": query, "maxResults": 1, "printType": "books", "country": "ES"}
     if restringir_es:
         params["langRestrict"] = "es"
+    if api_key:
+        params["key"] = api_key
 
     res = requests.get(
         "https://www.googleapis.com/books/v1/volumes",
