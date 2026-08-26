@@ -115,8 +115,9 @@ def _consultar_google_books(query, headers, restringir_es):
         "https://www.googleapis.com/books/v1/volumes",
         params=params, headers=headers, timeout=5
     )
-    # Devuelve también el status y el cuerpo, no solo el resultado final
-    return res.status_code, res.text, (res.json().get("items", []) if res.status_code == 200 else [])
+    items = res.json().get("items", []) if res.status_code == 200 else []
+    return res.status_code, res.text, items
+
 
 def buscar_en_google_books(titulo, autor=""):
     """
@@ -140,14 +141,16 @@ def buscar_en_google_books(titulo, autor=""):
     for query in consultas:
         for restringir_es in (True, False):
             try:
-               status, texto, items = _consultar_google_books(query, headers, restringir_es)
+                status, texto, items = _consultar_google_books(query, headers, restringir_es)
                 st.session_state["debug_log"].append(
                     f"[{titulo}] query='{query}' es_only={restringir_es} status={status} "
                     f"items={len(items)} | {texto[:150] if status != 200 else ''}"
                 )
-                if info is None:
+
+                if not items:
                     continue
 
+                info = items[0].get("volumeInfo", {})
                 imagenes = info.get("imageLinks", {})
                 portada_url = imagenes.get("thumbnail") or imagenes.get("smallThumbnail") or ""
                 if portada_url.startswith("http://"):
@@ -168,7 +171,6 @@ def buscar_en_google_books(titulo, autor=""):
         "titulo": titulo, "autor": autor if autor else "Desconocido",
         "publicacion": "N/A", "paginas": "N/A", "portada": ""
     }
-
 # --- INTERFAZ DE USUARIO ---
 
 st.title("📚 Mi Biblioteca Virtual Inteligente")
