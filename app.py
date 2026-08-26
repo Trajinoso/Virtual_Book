@@ -78,7 +78,9 @@ def eliminar_libro_db(libro_id):
 
 # --- FUNCIONES DE IA Y GOOGLE BOOKS ---
 
-def analizar_imagen_con_gemini(imagen_bytes):
+import time
+
+def analizar_imagen_con_gemini(imagen_bytes, intentos=3):
     api_key = st.secrets.get("GEMINI_API_KEY")
     if not api_key:
         st.error("No se encontró la clave GEMINI_API_KEY en st.secrets.")
@@ -92,19 +94,27 @@ def analizar_imagen_con_gemini(imagen_bytes):
     Si no sabes el autor, pon "Desconocido".
     Ejemplo: [{"titulo": "La montaña hueca", "autor": "B. Catling"}]
     """
-    try:
-        response = client.models.generate_content(
-            model='gemini-3.5-flash',
-            contents=[
-                types.Part.from_bytes(data=imagen_bytes, mime_type="image/jpeg"),
-                prompt
-            ],
-            config=types.GenerateContentConfig(response_mime_type="application/json")
-        )
-        return json.loads(response.text)
-    except Exception as e:
-        st.error(f"Error al analizar la imagen con IA: {e}")
-        return []
+
+    for intento in range(1, intentos + 1):
+        try:
+            response = client.models.generate_content(
+                model='gemini-3.5-flash',
+                contents=[
+                    types.Part.from_bytes(data=imagen_bytes, mime_type="image/jpeg"),
+                    prompt
+                ],
+                config=types.GenerateContentConfig(response_mime_type="application/json")
+            )
+            return json.loads(response.text)
+        except Exception as e:
+            es_temporal = "UNAVAILABLE" in str(e) or "503" in str(e) or "high demand" in str(e).lower()
+            if es_temporal and intento < intentos:
+                espera = 2 ** intento  # 2s, 4s, 8s
+                st.warning(f"Modelo saturado, reintentando en {espera}s... (intento {intento}/{intentos})")
+                time.sleep(espera)
+                continue
+            st.error(f"Error al analizar la imagen con IA: {e}")
+            return []
 
 def _consultar_google_books(query, headers, restringir_es):
     api_key = st.secrets.get("GOOGLE_BOOKS_API_KEY")
